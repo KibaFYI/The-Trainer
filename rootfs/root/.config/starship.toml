@@ -1,0 +1,43 @@
+# axolotl-forge prompt — purple
+add_newline = true
+format = """
+[╭─](#7C4DFF)$username$hostname$directory$git_branch$git_status$python$cmd_duration
+[╰─](#7C4DFF)$character"""
+
+[character]
+success_symbol = "[❯](bold #EA80FC)"
+error_symbol = "[❯](bold #FF5CCB)"
+
+[username]
+show_always = true
+format = "[🦎 $user]($style)"
+style_user = "bold #B388FF"
+style_root = "bold #B388FF"
+
+[hostname]
+ssh_only = false
+format = "[@$hostname]($style) "
+style = "#9575CD"
+
+[directory]
+style = "bold #D1B3FF"
+truncation_length = 4
+truncate_to_repo = false
+
+[git_branch]
+style = "#CE93D8"
+format = "[ $branch]($style) "
+
+[git_status]
+style = "#EA80FC"
+
+[python]
+style = "#B39DDB"
+format = "[🐍 $virtualenv]($style) "
+detect_extensions = []
+detect_files = []
+
+[cmd_duration]
+min_time = 2000
+style = "#9575CD"
+format = "[⏱ $duration]($style)"

@@ -1,0 +1,19 @@
+[color]
+	ui = auto
+[color "status"]
+	added = "#EA80FC"
+	changed = "#D1B3FF"
+	untracked = "#9575CD"
+	branch = "#7C4DFF" bold
+[color "diff"]
+	meta = "#7C4DFF" bold
+	frag = "#9575CD"
+	old = "#FF5CCB"
+	new = "#EA80FC"
+	plain = "#B388FF"
+[color "branch"]
+	current = "#EA80FC" bold
+	local = "#B388FF"
+	remote = "#9575CD"
+[credential]
+	helper = store

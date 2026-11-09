@@ -1,0 +1,24 @@
+// axolotl-forge zellij config — purple theme
+theme "forge"
+default_shell "zsh"
+pane_frames true
+show_startup_tips false
+show_release_notes false
+copy_on_select true
+scroll_buffer_size 50000
+
+themes {
+    forge {
+        fg "#B388FF"
+        bg "#1A1028"
+        black "#1A1028"
+        red "#FF5CCB"
+        green "#CE93D8"
+        yellow "#E1BEE7"
+        blue "#7C4DFF"
+        magenta "#EA80FC"
+        cyan "#B39DDB"
+        white "#EDE7F6"
+        orange "#D1B3FF"
+    }
+}

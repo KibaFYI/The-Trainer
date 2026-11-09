@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# purple <command...>  — run any command with every colour in its output turned purple
+# (keeps a real TTY, so progress bars still work)
+if [ $# -eq 0 ]; then
+    echo "usage: purple <command> [args...]" >&2
+    exit 2
+fi
+export PYTHONPATH="/opt/forge${PYTHONPATH:+:$PYTHONPATH}"
+exec /opt/forge/venv/bin/python -m forge purple -- "$@"

@@ -1,0 +1,128 @@
+# Builds the axolotl-forge image on GitHub's free runners and pushes it to
+#   ghcr.io/<your-github-user>/axolotl-forge:{latest, 0.21.1-cu130}
+# (no secrets needed). Optional Docker Hub push: add repo secrets DOCKERHUB_USERNAME and
+# DOCKERHUB_TOKEN, then run with "also push to Docker Hub" ticked.
+name: build image
+
+on:
+  workflow_dispatch:
+    inputs:
+      push_dockerhub:
+        description: "also push to Docker Hub (needs DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets)"
+        type: boolean
+        default: false
+      with_fa4:
+        description: "include Flash-Attention 4 (Hopper / Blackwell)"
+        type: boolean
+        default: false
+      with_deepep:
+        description: "build DeepEP for NVLink expert parallel"
+        type: boolean
+        default: false
+      deepep_arch:
+        description: "DeepEP arch: 9.0 = H100, 10.0 = B200"
+        type: string
+        default: "9.0"
+  push:
+    branches: [main]
+    paths: ["Dockerfile", "forge/**", "rootfs/**", ".github/workflows/build-image.yml"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AXOLOTL_VERSION: "0.21.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - name: Free disk space (the image is ~30 GB)
+        run: |
+          df -h / /mnt || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache \
+                      /usr/local/share/boost /usr/local/share/powershell /usr/share/swift /usr/local/julia* \
+                      /opt/az /opt/microsoft /opt/google /usr/lib/jvm /usr/local/share/chromium || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          df -h / /mnt || true
+
+      - name: Put Docker storage on the big /mnt disk
+        run: |
+          sudo systemctl stop docker
+          sudo mkdir -p /mnt/docker
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          docker info --format 'docker root: {{.DockerRootDir}}'
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image names and tags
+        id: names
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          PUSH_DH: ${{ inputs.push_dockerhub }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          ghcr="ghcr.io/${owner}/axolotl-forge"
+          tag="${AXOLOTL_VERSION}-cu130"
+          {
+            echo "ghcr=${ghcr}"
+            echo "tags<<EOF"
+            echo "${ghcr}:latest"
+            echo "${ghcr}:${tag}"
+            if [ "${PUSH_DH}" = "true" ] && [ -n "${DH_USER}" ]; then
+              echo "docker.io/${DH_USER}/axolotl-forge:latest"
+              echo "docker.io/${DH_USER}/axolotl-forge:${tag}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: ${{ inputs.push_dockerhub }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.names.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=Plug-and-play Axolotl fine-tuning image with AI-written configs
+          build-args: |
+            AXOLOTL_VERSION=${{ env.AXOLOTL_VERSION }}
+            WITH_FA4=${{ inputs.with_fa4 && '1' || '0' }}
+            WITH_DEEPEP=${{ inputs.with_deepep && '1' || '0' }}
+            DEEPEP_ARCH=${{ inputs.deepep_arch || '9.0' }}
+            MAX_JOBS=4
+          # inline cache: a later rebuild after a forge/ change only redoes the last layers
+          cache-from: type=registry,ref=${{ steps.names.outputs.ghcr }}:latest
+          cache-to: type=inline
+
+      - name: Done
+        run: |
+          echo "### pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.names.outputs.tags }}' | sed 's/^/- `/; s/$/`/' >> "$GITHUB_STEP_SUMMARY"
+          df -h /mnt

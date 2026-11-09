@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# ── axolotl-forge entrypoint ────────────────────────────────────────────────────
+#  1. purple banner            4. FORGE_MODEL + FORGE_DATASET set  -> `forge run --yes`
+#  2. ssh (PUBLIC_KEY / ROOT_PASSWORD)    in tmux session "forge", log mirrored to stdout
+#  3. env handed to ssh shells 5. else: interactive shell (TTY) or stay alive for ssh
+set -uo pipefail
+. /etc/forge/purple.sh
+
+FORGE_HOME="${FORGE_HOME:-/workspace/forge}"
+export FORGE_HOME
+say()  { printf '%s[forge]%s %s%s\n' "$(printf '\033[1;38;2;124;77;255m')" "$FORGE_SGR" "$*" "$(printf '\033[0m')"; }
+warn() { printf '%s[forge] %s%s\n' "$(printf '\033[1;38;2;255;92;203m')" "$*" "$(printf '\033[0m')"; }
+
+mkdir -p "$FORGE_HOME"/{configs,datasets,models,outputs,logs,runs} "${HF_HOME:-/workspace/.cache/huggingface}" /etc/forge
+
+forge banner --entry 2>/dev/null || say "axolotl-forge"
+
+# ── hand env vars to ssh / tmux shells (they don't inherit the container env) ──
+{
+    while IFS='=' read -r name _; do
+        case "$name" in
+            FORGE_*|HF_*|HUGGING_FACE_*|ANTHROPIC_*|OPENAI_*|OPENROUTER_*|RUNPOD_*|VAST_*|CUDA_VISIBLE_DEVICES|NCCL_*|NVIDIA_*|PATH|LD_LIBRARY_PATH|PYTHONPATH|WANDB_*|AXOLOTL_*|TORCH_*|TRITON_*)
+                printf 'export %s=%q\n' "$name" "${!name}" ;;
+        esac
+    done < <(env)
+} > /etc/forge/env.sh
+chmod 600 /etc/forge/env.sh
+
+# ── ssh ───────────────────────────────────────────────────────────────────────────
+setup_ssh() {
+    mkdir -p /root/.ssh /run/sshd
+    chmod 700 /root/.ssh
+    touch /root/.ssh/authorized_keys
+    for key in "${PUBLIC_KEY:-}" "${SSH_PUBLIC_KEY:-}"; do
+        [ -n "$key" ] && printf '%s\n' "$key" >> /root/.ssh/authorized_keys
+    done
+    sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    rm -f /etc/ssh/sshd_config.d/10-forge-password.conf
+    if [ -n "${ROOT_PASSWORD:-}" ]; then
+        echo "root:${ROOT_PASSWORD}" | chpasswd
+        printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/10-forge-password.conf
+    fi
+    if [ -s /root/.ssh/authorized_keys ] || [ -n "${ROOT_PASSWORD:-}" ] || [ "${FORGE_SSH:-auto}" = "1" ]; then
+        ssh-keygen -A >/dev/null 2>&1
+        if /usr/sbin/sshd -E "$FORGE_HOME/logs/sshd.log"; then
+            say "sshd listening on :22"
+        else
+            warn "sshd failed to start (see $FORGE_HOME/logs/sshd.log)"
+        fi
+    fi
+}
+[ "${FORGE_SSH:-auto}" != "0" ] && setup_ssh
+
+# ── optional TensorBoard on :6006 ─────────────────────────────────────────────────
+if [ "${FORGE_TENSORBOARD:-0}" = "1" ]; then
+    nohup tensorboard --logdir "$FORGE_HOME/outputs" --host 0.0.0.0 --port 6006 \
+        > "$FORGE_HOME/logs/tensorboard.log" 2>&1 &
+    say "tensorboard on :6006"
+fi
+
+# ── explicit command wins ─────────────────────────────────────────────────────────
+if [ $# -gt 0 ]; then
+    exec "$@"
+fi
+
+autorun=0
+case "${FORGE_AUTORUN:-auto}" in
+    1|true|yes) autorun=1 ;;
+    auto) [ -n "${FORGE_MODEL:-}" ] && [ -n "${FORGE_DATASET:-}" ] && autorun=1 ;;
+esac
+
+if [ "$autorun" = "1" ]; then
+    say "FORGE_MODEL + FORGE_DATASET found -> starting the pipeline in tmux session 'forge'"
+    say "watch it: ssh in and run 'forge attach' (or 'forge logs -f')"
+    tmux new-session -d -s forge -x 220 -y 50 \
+        "forge run --yes; echo; echo '── forge run finished. this tmux window stays open ──'; exec zsh -l"
+    if [ -t 0 ] && [ -t 1 ]; then
+        exec tmux attach -t forge
+    fi
+    # mirror the run log to container stdout (docker logs / RunPod log viewer)
+    (
+        for _ in $(seq 1 600); do [ -e "$FORGE_HOME/logs/latest.log" ] && break; sleep 1; done
+        exec tail -n +1 -F "$FORGE_HOME/logs/latest.log" 2>/dev/null
+    ) &
+    exec sleep infinity
+fi
+
+if [ -t 0 ] && [ -t 1 ]; then
+    exec zsh -l   # the login shell pops up the setup screen
+fi
+
+say "idle - ssh in and the setup screen pops up (or set FORGE_MODEL + FORGE_DATASET to autorun)"
+exec sleep infinity

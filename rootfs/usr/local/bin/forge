@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# axolotl-forge CLI launcher
+export PYTHONPATH="/opt/forge${PYTHONPATH:+:$PYTHONPATH}"
+exec /opt/forge/venv/bin/python -m forge "$@"
