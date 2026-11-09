@@ -89,7 +89,6 @@ All other settings are listed in [.env.example](.env.example).
 
 Axolotl with all of its add-ons ready to go, including Liger, Cut Cross Entropy and DeepSpeed,
 plus support for training on several GPUs at once. Weights & Biases is turned off.
-The whole terminal is purple.
 
 ## Updating the image
 
