@@ -122,8 +122,17 @@ def axolotl_cmd() -> list[str]:
     return shlex.split(os.environ.get("FORGE_AXOLOTL_BIN", "axolotl"))
 
 
+LOCAL_TRITON_CACHE = "/root/.triton/cache"
+
+
 def train_env(settings: Settings) -> dict:
     env = dict(os.environ)
+    # Compiled-kernel caches belong on the pod's own disk. Every GPU writes them at the same time, and a
+    # network volume (RunPod network / global storage on /workspace) fails that with
+    # "OSError: [Errno 5] Input/output error" -> "'CompiledKernel' object has no attribute 'module'".
+    triton = env.get("TRITON_CACHE_DIR", "")
+    if not triton or triton.startswith("/workspace"):
+        env["TRITON_CACHE_DIR"] = LOCAL_TRITON_CACHE
     env.setdefault("WANDB_MODE", "disabled")
     env.setdefault("WANDB_DISABLED", "true")
     env.setdefault("AXOLOTL_DO_NOT_TRACK", "1")
