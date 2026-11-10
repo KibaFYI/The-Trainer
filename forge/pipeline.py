@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import yaml
+from rich.text import Text
 
 from . import autoconfig, fetch, hardware, notify, providers, sampler, ui, upload
 from .settings import Settings
@@ -131,23 +132,68 @@ def train_env(settings: Settings) -> dict:
     return env
 
 
-_ANSI = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+_ANSI = re.compile(r"\x1b\[[0-9;:?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>78]")
+_RANK = re.compile(r"^\[(?:rank|default)\d*\]:\s?")  # torchrun / accelerate prefix every line with "[rank0]: "
+_TRACEBACK = re.compile(r"^(?:\[(?:rank|default)\d*\]:\s?)?Traceback \(most recent call last\)", re.M)
+_ERR_LINE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*(?:Error|Exception|Interrupt)\b.*"
+    r"|(?:error|fatal)\b.*"
+    r"|.*\b(?:out of memory|No space left on device|Killed|Segmentation fault|core dumped|CUDA error|NCCL error|"
+    r"exitcode\s*:\s*-?\d+|returned non-zero exit status)\b.*)$",
+    re.I,
+)
+
+
+def _clean_log(raw: str) -> list[str]:
+    """Plain lines from terminal output: colours stripped, progress bars reduced to their last state."""
+    text = _ANSI.sub("", raw).replace("\r\n", "\n")  # a pseudo-terminal ends every line with \r\n
+    lines = []
+    for ln in text.split("\n"):
+        parts = [p for p in ln.split("\r") if p.strip()]  # a bare \r is a progress bar redrawing itself
+        if parts:
+            lines.append(parts[-1].rstrip())
+    return lines
 
 
 def log_tail(log_path: Path, start: int, max_chars: int = 12000) -> str:
-    """The useful end of what a step printed: from the last traceback, else the last lines."""
+    """What a failed step printed, for the AI and the error box.
+
+    The key error lines come first (the real exception, OOM, disk full, ...). Then the log from the
+    FIRST traceback that still fits: the real error is printed before the launcher's own
+    'CalledProcessError' traceback, so taking the last one would hide it. No traceback -> last lines."""
     with open(log_path, "rb") as fh:
         fh.seek(start)
         raw = fh.read().decode("utf-8", errors="replace")
-    text = _ANSI.sub("", raw)
-    lines = [ln.split("\r")[-1] for ln in text.split("\n")]  # keep only the final state of progress bars
-    text = "\n".join(ln for ln in lines if ln.strip())
-    idx = text.rfind("Traceback (most recent call last)")
-    if idx != -1:
-        text = text[idx:]
+    lines = _clean_log(raw)
+    if not lines:
+        return ""
+    text = "\n".join(lines)
+    key = [_RANK.sub("", ln).strip() for ln in lines]
+    key = list(dict.fromkeys(k[:400] for k in key if _ERR_LINE.match(k)))[-10:]
+    head = ("key error lines:\n" + "\n".join(f"  {k}" for k in key) + "\n\n") if key else ""
+    budget = max(2000, max_chars - len(head))
+    starts = [m.start() for m in _TRACEBACK.finditer(text)]
+    fitting = [s for s in starts if len(text) - s <= budget]
+    if fitting:
+        body = text[fitting[0]:]
+        context = "\n".join(text[: fitting[0]].splitlines()[-15:])  # what was happening just before
+        if context and len(context) + 1 + len(body) <= budget:
+            body = context + "\n" + body
+    elif starts:
+        body = text[starts[-1]:]
     else:
-        text = "\n".join(text.splitlines()[-150:])
-    return text[-max_chars:]
+        body = "\n".join(lines[-150:])
+    return head + body[-budget:]
+
+
+def error_box_text(error: str, limit: int = 2500) -> str:
+    """Shorten a log_tail() for the screen, keeping the key error lines at the top."""
+    if len(error) <= limit:
+        return error
+    head, sep, body = error.partition("\n\n")
+    if error.startswith("key error lines:") and sep:
+        return head + "\n\n…\n" + body[-max(800, limit - len(head)):]
+    return "…\n" + error[-limit:]
 
 
 def train_once(settings: Settings, cfg_path: Path, hw: hardware.Hardware, log_path: Path) -> tuple[int, str, str]:
@@ -161,7 +207,10 @@ def train_once(settings: Settings, cfg_path: Path, hw: hardware.Hardware, log_pa
         start = log_path.stat().st_size
         rc = ui.run_purple(cmd, log_path, env=env)
         if rc != 0:
-            return rc, stage, log_tail(log_path, start)
+            error = log_tail(log_path, start)
+            if not error.strip():
+                error = f"(`axolotl {stage}` exited with code {rc} and printed nothing)"
+            return rc, stage, error
     return 0, "", ""
 
 
@@ -192,7 +241,7 @@ def train_with_fixes(
             raise KeyboardInterrupt
         state.mark("train", "failed", attempt=attempt, rc=rc, failed_stage=stage)
         ui.err(f"{stage} failed (exit {rc}) on attempt {attempt}/{max_attempts}")
-        ui.panel(error[-2500:] or "(no output)", f"{stage} error")
+        ui.panel(Text(error_box_text(error) or "(no output)"), f"{stage} error")
         if attempt == max_attempts:
             break
         if drafter is None:

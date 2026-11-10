@@ -70,6 +70,10 @@ class Discord:
         self.send("✅ all finished", f"`{self.run_name}` is done", fields)
 
     def failed(self, stage: str, error: str, attempts: int | None = None) -> None:
-        tail = error.strip()[-1500:]
+        head, sep, body = error.strip().partition("\n\n")
+        if head.startswith("key error lines:") and sep:  # from pipeline.log_tail: the real error is up top
+            tail = (head[:900] + "\n…\n" + body[-500:]).replace("```", "'''")
+        else:
+            tail = error.strip()[-1500:].replace("```", "'''")
         what = f"{stage} failed" + (f" {attempts} times" if attempts else "")
         self.send(f"❌ {what}", f"```\n{tail}\n```", ok=False)

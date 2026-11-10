@@ -47,7 +47,8 @@ Hard rules:
 """
 
 FIX_PROMPT = """## TRAINING FAILED (attempt {attempt} of {max_attempts})
-The CURRENT CONFIG passed axolotl's validator, but the run crashed. End of the log:
+The CURRENT CONFIG passed axolotl's validator, but the run crashed. What it printed (key error lines first, then the
+log from the first traceback):
 ```
 {error}
 ```

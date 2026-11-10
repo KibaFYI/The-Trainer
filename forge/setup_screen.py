@@ -1,7 +1,7 @@
 """The first-boot setup screen.
 
 The wolfgon sits in the middle of the terminal with one question under it at a time:
-HF token -> AI key -> model -> dataset -> Claude Sonnet/Opus -> model name -> where the LoRA
+HF token -> AI key -> model -> dataset -> Claude Sonnet/Opus (or any OpenRouter model) -> model name -> where the LoRA
 goes -> where the merged model goes -> Discord webhook. Then: fetch -> Claude writes the
 config -> you look through / edit it -> training starts; a crash goes back to Claude for a
 fix (3 attempts, then a Discord alert) -> merge -> uploads -> Discord -> back to the start.
@@ -41,7 +41,10 @@ CLAUDE = {
     "opus": {"label": "Claude Opus 5.5", "anthropic": "claude-opus-5-5", "openrouter": "anthropic/claude-opus-5.5",
              "hint": "the strongest - best for tricky models, MoE and multi-GPU"},
 }
-SAVED_FIELDS = ("model_url", "dataset_url", "claude", "name", "lora_ns", "merged_ns", "private", "goal")
+CUSTOM = "custom"  # any other OpenRouter model (Answers.or_model)
+SEARCH_AGAIN = "__search__"
+OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models"
+SAVED_FIELDS = ("model_url", "dataset_url", "claude", "or_model", "name", "lora_ns", "merged_ns", "private", "goal")
 
 
 def _mask(secret: str | None) -> str:
@@ -62,7 +65,8 @@ class Answers:
     ai_key: str | None = None
     model_url: str | None = None
     dataset_url: str | None = None
-    claude: str = "sonnet"
+    claude: str = "sonnet"  # sonnet | opus | custom (OpenRouter only)
+    or_model: str | None = None  # the OpenRouter model id when claude == "custom"
     name: str | None = None
     lora_ns: str | None = None
     merged_ns: str | None = None
@@ -85,6 +89,9 @@ class Answers:
         )
         if settings.llm_model and "opus" in settings.llm_model:
             a.claude = "opus"
+        elif settings.llm_model and "/" in settings.llm_model and \
+                settings.llm_model not in {v["openrouter"] for v in CLAUDE.values()}:
+            a.claude, a.or_model = CUSTOM, settings.llm_model
         saved = settings.home / "setup.json"
         if saved.exists():
             try:
@@ -109,6 +116,27 @@ class Answers:
         if not self.ai_key:
             return None
         return "openrouter" if self.ai_key.startswith("sk-or-") else "anthropic"
+
+    @property
+    def uses_custom_model(self) -> bool:
+        return self.ai_kind == "openrouter" and self.claude == CUSTOM and bool(self.or_model)
+
+    @property
+    def ai_model(self) -> str | None:
+        """The model id to send to the chosen provider."""
+        if not self.ai_kind:
+            return None
+        if self.uses_custom_model:
+            return self.or_model
+        return CLAUDE.get(self.claude, CLAUDE["sonnet"])[self.ai_kind]
+
+    @property
+    def ai_model_label(self) -> str:
+        if not self.ai_kind:
+            return "-"
+        if self.uses_custom_model:
+            return self.or_model or "-"
+        return CLAUDE.get(self.claude, CLAUDE["sonnet"])["label"]
 
     @property
     def lora_repo(self) -> str | None:
@@ -296,6 +324,7 @@ def step_ai(screen: Screen, a: Answers, step: str) -> None:
         body = [
             f"Paste your [bold {ui.HOT}]Anthropic API key[/] (sk-ant-…). An OpenRouter key (sk-or-…) works too.",
             f"[{ui.DIM}]Claude writes the training config and fixes it if training crashes.[/]",
+            f"[{ui.DIM}]With an OpenRouter key you can also pick any other model a few steps later.[/]",
             f"[{ui.DIM}]type skip to use forge's rules engine instead (no AI fixes)[/]",
         ]
         if a.ai_key:
@@ -355,12 +384,121 @@ def step_dataset(screen, a, step):
     _ask_link(screen, a, step, "dataset")
 
 
+def _openrouter_models(key: str | None) -> list[dict]:
+    """Every OpenRouter model that answers in text, newest first."""
+    import requests
+
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    resp = requests.get(OPENROUTER_MODELS, headers=headers, timeout=20)
+    resp.raise_for_status()
+    models = []
+    for m in resp.json().get("data", []):
+        outputs = (m.get("architecture") or {}).get("output_modalities") or ["text"]
+        if m.get("id") and "text" in outputs:
+            models.append(m)
+    models.sort(key=lambda m: m.get("created") or 0, reverse=True)
+    return models
+
+
+def _price(per_token) -> str | None:
+    try:
+        value = float(per_token) * 1_000_000
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return f"${value:.2f}".replace(".00", "") if value < 10 else f"${value:.0f}"
+
+
+def _model_label(m: dict) -> str:
+    bits = []
+    ctx = m.get("context_length")
+    if ctx:
+        bits.append(f"{ctx / 1_000_000:g}M ctx" if ctx >= 1_000_000 else f"{ctx // 1000}k ctx")
+    pricing = m.get("pricing") or {}
+    inp, out = _price(pricing.get("prompt")), _price(pricing.get("completion"))
+    if inp == "$0" and out == "$0":
+        bits.append("free")
+    elif inp and out:
+        bits.append(f"{inp} in / {out} out per 1M")
+    extra = f"  [{ui.DIM}]{' · '.join(bits)}[/]" if bits else ""
+    return f"{escape(m['id'])}{extra}"
+
+
+def _search_models(models: list[dict], query: str) -> list[dict]:
+    words = query.lower().split()
+    return [m for m in models if all(w in f"{m['id']} {m.get('name', '')}".lower() for w in words)]
+
+
+def _pick_openrouter_model(screen: Screen, a: Answers, step: str) -> bool:
+    """Search OpenRouter's model list and pick one. False means the user went back."""
+    problem = None
+    try:
+        with ui.console.status("loading OpenRouter's model list…"):
+            models = _openrouter_models(a.ai_key)
+    except Exception as exc:  # noqa: BLE001
+        models, problem = [], _short(exc)
+    by_id = {m["id"].lower(): m["id"] for m in models}
+    error = None
+    while True:
+        body = [
+            f"Type an [bold {ui.HOT}]OpenRouter model id[/] or a word to search for.",
+            f"[{ui.DIM}]e.g. gemini · deepseek · gpt · qwen · kimi · back to go back[/]",
+        ]
+        if a.or_model:
+            body += ["", f"current: [bold {ui.HOT}]{escape(a.or_model)}[/]  [{ui.DIM}](Enter keeps it)[/]"]
+        if problem:
+            body += ["", f"[{ui.DIM}]could not load the model list ({escape(problem)}) - type the exact id, like google/gemini-3-pro[/]"]
+        value = screen.ask(step, "Pick an OpenRouter model", body, error) or (a.or_model or "")
+        error = None
+        if not value:
+            error = "type a model id or a word to search for"
+            continue
+        if value.lower() == "back":
+            return False
+        if value.lower() in by_id:
+            a.or_model = by_id[value.lower()]
+            return True
+        if not models:
+            if "/" in value and " " not in value:
+                a.or_model = value
+                return True
+            error = "model ids look like company/model"
+            continue
+        hits = _search_models(models, value)
+        if not hits:
+            error = f"no OpenRouter model matches '{value}'"
+            continue
+        shown = hits[:9]
+        note = f"{len(hits)} found, newest first" + (f" - showing {len(shown)}, type more words to narrow it" if len(hits) > len(shown) else "")
+        options = [(m["id"], _model_label(m)) for m in shown] + [(SEARCH_AGAIN, f"[{ui.DIM}]search again[/]")]
+        choice = screen.pick(step, f"Models matching '{value}'", [f"[{ui.DIM}]{escape(note)}[/]"], options, 0)
+        if choice != SEARCH_AGAIN:
+            a.or_model = choice
+            return True
+
+
 def step_claude(screen: Screen, a: Answers, step: str) -> None:
     if not a.ai_key:
         return
     options = [(k, f"{v['label']}  [{ui.DIM}]{v['hint']}[/]") for k, v in CLAUDE.items()]
-    default = list(CLAUDE).index(a.claude) if a.claude in CLAUDE else 0
-    a.claude = screen.pick(step, "Which Claude writes the config?", ["It reads 5 random sectors of your dataset, the installed plugins and this machine's GPUs."], options, default)
+    title = "Which Claude writes the config?"
+    if a.ai_kind == "openrouter":
+        title = "Which AI writes the config?"
+        now = f" - now [bold {ui.HOT}]{escape(a.or_model)}[/]" if a.or_model else ""
+        options.append((CUSTOM, f"Another model{now}  [{ui.DIM}]search every model on OpenRouter[/]"))
+    keys = [k for k, _ in options]
+    default = keys.index(a.claude) if a.claude in keys else 0
+    intro = ["It reads 5 random sectors of your dataset, the installed plugins and this machine's GPUs."]
+    while True:
+        choice = screen.pick(step, title, intro, options, default)
+        if choice != CUSTOM:
+            a.claude = choice
+            return
+        if _pick_openrouter_model(screen, a, step):
+            a.claude = CUSTOM
+            return
+        default = keys.index(CUSTOM)
 
 
 def _default_name(a: Answers) -> str:
@@ -447,7 +585,7 @@ STEPS = [
     ("AI key", step_ai),
     ("model", step_model),
     ("dataset", step_dataset),
-    ("Claude", step_claude),
+    ("AI model", step_claude),
     ("name", step_name),
     ("LoRA upload", step_lora),
     ("merged upload", step_merged),
@@ -468,7 +606,7 @@ def _summary_table(a: Answers) -> Table:
         ("2", "AI key", ai if a.ai_key else "skipped (rules engine)"),
         ("3", "model", a.model_url or "-"),
         ("4", "dataset", a.dataset_url or "-"),
-        ("5", "Claude", CLAUDE[a.claude]["label"] if a.ai_key else "-"),
+        ("5", "AI model", a.ai_model_label),
         ("6", "name", a.name or "-"),
         ("7", "LoRA ->", a.lora_repo or "not uploaded"),
         ("8", "merged ->", a.merged_repo or "not merged / not uploaded"),
@@ -529,7 +667,7 @@ def review_config(screen: Screen, drafter: autoconfig.Drafter, prof: sampler.Dat
         ui.show_yaml(drafter.path.read_text(encoding="utf-8"), title=f"{drafter.path.name} · written by {drafter.source}")
         if note:
             ui.console.print(f"  {note}")
-        ai = "[hot]r[/hot] ask Claude to change something  ·  " if drafter.provider else ""
+        ai = "[hot]r[/hot] ask the AI to change something  ·  " if drafter.provider else ""
         ui.console.print(
             f"  [hot]Enter[/hot] start training  ·  [hot]e[/hot] edit in {os.environ.get('EDITOR', 'nano')}  ·  "
             f"[hot]d[/hot] dataset samples  ·  {ai}[hot]b[/hot] rules-engine baseline  ·  [dim]cmd-exit[/dim]"
@@ -552,7 +690,7 @@ def review_config(screen: Screen, drafter: autoconfig.Drafter, prof: sampler.Dat
             pipeline.show_profile(prof)
             ui.read_line(f"  [{ui.DIM}]Enter to go back to the config[/] ")
         elif choice == "r" and drafter.provider:
-            what = ui.read_line(f"  [bold {ui.HOT}]what should Claude change?[/] ").strip()
+            what = ui.read_line(f"  [bold {ui.HOT}]what should the AI change?[/] ").strip()
             if what:
                 drafter.draft(what)
         elif choice == "b":
@@ -572,10 +710,10 @@ def execute(screen: Screen, a: Answers, base: Settings) -> str:
     s.run_name = f"{a.name}-{_dt.datetime.now():%m%d-%H%M}"
     if a.ai_kind == "anthropic":
         os.environ["ANTHROPIC_API_KEY"] = a.ai_key or ""
-        s.provider, s.llm_model = "anthropic", CLAUDE[a.claude]["anthropic"]
+        s.provider, s.llm_model = "anthropic", a.ai_model
     elif a.ai_kind == "openrouter":
         os.environ["OPENROUTER_API_KEY"] = a.ai_key or ""
-        s.provider, s.llm_model = "openrouter", CLAUDE[a.claude]["openrouter"]
+        s.provider, s.llm_model = "openrouter", a.ai_model
     else:
         s.provider = "none"
     if a.hf_token:
@@ -656,7 +794,9 @@ def finish_screen(screen: Screen, run_name: str, summary: dict, urls: list[str],
 
 
 def error_screen(screen: Screen, title: str, message: str) -> None:
-    tail = "\n".join(message.strip().splitlines()[-14:])[-1400:]
+    head, sep, _ = message.strip().partition("\n\n")
+    source = head if head.startswith("key error lines:") and sep else message.strip()
+    tail = "\n".join(source.splitlines()[-14:])[-1400:]
     body = [
         f"[bold {ui.ERR}]{escape(tail) or 'unknown error'}[/]",
         "",

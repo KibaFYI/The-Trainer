@@ -31,7 +31,7 @@ It asks one question at a time:
 2. Your AI key
 3. The model to train (link)
 4. The dataset (link)
-5. Claude Sonnet or Claude Opus
+5. Claude Sonnet or Claude Opus (with an OpenRouter key you can search and pick any other model)
 6. A name for your model
 7. Where to upload the LoRA
 8. Where to upload the merged model
