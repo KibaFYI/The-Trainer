@@ -16,7 +16,7 @@ is uploaded to your Hugging Face account.
 ## Start it on RunPod
 
 1. Go to **Templates** → **New Template**.
-2. Set **Container Image** to `ghcr.io/kibafyi/axolotl-forge:latest`
+2. Set **Container Image** to `ghcr.io/kibafyi/axolotl-forge:0.21.1-cu130`
 3. Set **Container Disk** to 30 GB.
 4. Set **Volume Disk** to 100 GB or more, mounted at `/workspace`.
 5. Add **TCP port** `22`.
@@ -93,4 +93,4 @@ plus support for training on several GPUs at once. Weights & Biases is turned of
 ## Updating the image
 
 Change the code in this repo and push it. GitHub rebuilds the image for free, and
-`ghcr.io/kibafyi/axolotl-forge:latest` gets the new version. (Changes to this README don't trigger a rebuild.)
+`ghcr.io/kibafyi/axolotl-forge:0.21.1-cu130` gets the new version. (Changes to this README don't trigger a rebuild.)
